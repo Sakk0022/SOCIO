@@ -6,7 +6,6 @@
 <title>AI-тренажёр социальных ситуаций</title>
 <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800&family=Open+Sans:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="styles.css">
-<link rel="icon" href="situacia/bot.jpg">
 </head>
 <body>
 
@@ -14,14 +13,14 @@
 <div class="api-modal" id="apiModal">
   <div class="api-modal-box">
     <div class="api-modal-icon">🤖</div>
-    <div class="api-modal-title">Введите Gemini API ключ</div>
+    <div class="api-modal-title">Выберите вид работы</div>
     <div class="api-modal-desc">
-      Для работы свободного чата с ИИ-ассистентом нужен API ключ Google Gemini.<br>
-      Получить бесплатно: <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a>
+      Можно запустить тренажёр с ИИ-генератором или без него.<br>
+      Режим с ИИ использует Gemini и берёт ключ из файла .env.
     </div>
-    <input class="api-modal-input" id="apiKeyInput" type="password" placeholder="Вставьте ваш Gemini API ключ..."/>
-    <button class="api-modal-btn" onclick="saveApiKey()">Начать тренажёр →</button>
-    <div class="api-modal-skip" onclick="skipApiKey()">Продолжить без ИИ-чата</div>
+    <button class="api-modal-btn" onclick="startWithAi()">Запустить с ИИ-генератором</button>
+    <button class="api-modal-btn" onclick="skipApiKey()" style="margin-top:10px;background:#eef2ff;color:#344054">Запустить без ИИ-генератора</button>
+    <div class="api-modal-skip">Добавь ключ в .env и запусти проект через npm start</div>
   </div>
 </div>
 
@@ -212,64 +211,141 @@ const SITUATIONS = [
 let current = 0;
 let answered = false;
 let geminiKey = '';
+let geminiKeyPromise = null;
+
+const GEMINI_ENV_URL = './.env';
+const GEMINI_ENV_KEYS = ['GEMINI_API_KEY', 'VITE_GEMINI_API_KEY', 'GOOGLE_API_KEY'];
+
 // Список моделей для последовательного fallback — порядок по приоритету
 const GEMINI_MODELS = [
-  'gemini-3.1-flash-lite',
+  
   'gemini-3-flash',
   'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
-  'chat-bison@001'
+   'chat-bison@001'
 ];
 
 // Универсальная обёртка: пробует модели одну за другой, пока не получит приемлемый ответ.
 async function generateWithFallback(payload) {
-  // Клиент теперь посылает запрос на локальный API-эндпоинт /api/gemini,
-  // где уже читается GEMINI_API_KEY из server env (на Vercel — Environment Variables).
-  // Функция по-прежнему перебирает модели, но запросы идут на наш прокси.
   let lastErr = null;
   for (const model of GEMINI_MODELS) {
+    if (!geminiKey) break; // если ключа нет, не пытаемся
     try {
-      const res = await fetch('/api/gemini', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ payload, model })
-      });
+      console.info('Попытка модели:', model);
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }
+      );
 
-      const text = await res.text();
-      let data;
-      try { data = JSON.parse(text); } catch (_) { data = { raw: text }; }
+      const data = await res.json().catch(() => ({ error: { message: 'Invalid JSON in response' } }));
 
-      // если модель недоступна — попробуем следующую
-      const rawStr = JSON.stringify(data).toLowerCase();
-      if (res.status === 404 || rawStr.includes('not found') || rawStr.includes('not supported') || rawStr.includes('is not found')) {
+      // если модель не найдена или не поддерживает метод — пробуем следующий
+      const raw = JSON.stringify(data).toLowerCase();
+      if (res.status === 404 || raw.includes('not found') || raw.includes('not supported') || raw.includes('is not found')) {
+        console.warn('Модель не найдена/не поддерживает метод, пробую следующую:', model, data);
         lastErr = data;
         continue;
       }
 
-      if (res.status === 429 || rawStr.includes('quota') || rawStr.includes('rate limit')) {
+      // при квоте/лимите — возвращаемся сразу (фолбэк не поможет)
+      if (res.status === 429 || raw.includes('quota') || raw.includes('rate limit')) {
+        console.warn('Квота или rate limit для модели:', model, data);
         return data;
       }
 
-      if (data && data.candidates && data.candidates[0]?.content?.parts?.[0]?.text) return data;
-      if (data && data.error) return data;
+      // если получили рабочий ответ (candidates) — вернуть его
+      if (data && data.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
+        console.info('Успешный ответ от модели:', model);
+        return data;
+      }
 
+      // если есть явная ошибка — вернуть её, это может быть полезно пользователю
+      if (data && data.error) {
+        console.warn('Ошибка от модели:', model, data.error);
+        return data;
+      }
+
+      // иначе — вернуть то, что есть (может быть пустой ответ)
       return data;
     } catch (e) {
+      console.warn('Сетевой/неожиданный error для модели', model, e);
       lastErr = e;
+      // при сетевой ошибке — продолжим на следующей модели
       continue;
     }
   }
+  // если все модели не сработали — бросим последнее исключение или общий Text
   throw lastErr || new Error('No available models or network error');
 }
 
+function parseEnv(text) {
+  const env = {};
+
+  text.split(/\r?\n/).forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return;
+
+    const normalized = trimmed.startsWith('export ')
+      ? trimmed.slice(7).trim()
+      : trimmed;
+
+    const eqIndex = normalized.indexOf('=');
+    if (eqIndex === -1) return;
+
+    const key = normalized.slice(0, eqIndex).trim();
+    const value = normalized.slice(eqIndex + 1).trim().replace(/^['"]|['"]$/g, '');
+    env[key] = value;
+  });
+
+  return env;
+}
+
+async function loadGeminiKeyFromEnv() {
+  if (geminiKey) return geminiKey;
+  if (geminiKeyPromise) return geminiKeyPromise;
+
+  geminiKeyPromise = (async () => {
+    const res = await fetch(`${GEMINI_ENV_URL}?v=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) {
+      throw new Error('Не удалось загрузить файл .env');
+    }
+
+    const envText = await res.text();
+    const env = parseEnv(envText);
+    const foundKey = GEMINI_ENV_KEYS.map((key) => env[key]).find(Boolean);
+
+    geminiKey = (foundKey || '').trim();
+    return geminiKey;
+  })();
+
+  try {
+    return await geminiKeyPromise;
+  } finally {
+    geminiKeyPromise = null;
+  }
+}
+
 // ── API KEY ──
-function saveApiKey() {
-  const val = document.getElementById('apiKeyInput').value.trim();
-  if (!val) { alert('Введите API ключ или нажмите "Продолжить без ИИ-чата"'); return; }
-  geminiKey = val;
+async function startWithAi() {
+  try {
+    geminiKey = (await loadGeminiKeyFromEnv()).trim();
+  } catch (error) {
+    console.warn('Не удалось прочитать .env:', error);
+    geminiKey = '';
+  }
+
+  if (!geminiKey) {
+    alert('Ключ Gemini не найден в файле .env. Добавь строку GEMINI_API_KEY=твой_ключ и запусти проект через npm start.');
+    return;
+  }
   document.getElementById('apiModal').style.display = 'none';
   loadSituation(0);
 }
+
 function skipApiKey() {
   document.getElementById('apiModal').style.display = 'none';
   loadSituation(0);
@@ -565,7 +641,7 @@ async function sendMessage() {
   addChatMsg('user', text);
 
   if (!geminiKey) {
-    addChatMsg('ai', 'Для свободного чата нужен Gemini API ключ. Перезагрузи страницу и введи ключ!');
+    addChatMsg('ai', 'Для свободного чата нужен Gemini API ключ из файла .env. Перезапусти страницу и выбери режим с ИИ.');
     return;
   }
 
