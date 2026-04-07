@@ -1131,6 +1131,70 @@ const SITUATIONS = [
 let current = 0;
 let answered = false;
 let geminiKey = '';
+// Список моделей для последовательного fallback — порядок по приоритету
+const GEMINI_MODELS = [
+  'gemini-3.1-flash-lite',
+  'gemini-3.1',
+  'gemini-2.5-flash-lite',
+  'chat-bison@001'
+];
+
+// Универсальная обёртка: пробует модели одну за другой, пока не получит приемлемый ответ.
+async function generateWithFallback(payload) {
+  let lastErr = null;
+  for (const model of GEMINI_MODELS) {
+    if (!geminiKey) break; // если ключа нет, не пытаемся
+    try {
+      console.info('Попытка модели:', model);
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }
+      );
+
+      const data = await res.json().catch(() => ({ error: { message: 'Invalid JSON in response' } }));
+
+      // если модель не найдена или не поддерживает метод — пробуем следующий
+      const raw = JSON.stringify(data).toLowerCase();
+      if (res.status === 404 || raw.includes('not found') || raw.includes('not supported') || raw.includes('is not found')) {
+        console.warn('Модель не найдена/не поддерживает метод, пробую следующую:', model, data);
+        lastErr = data;
+        continue;
+      }
+
+      // при квоте/лимите — возвращаемся сразу (фолбэк не поможет)
+      if (res.status === 429 || raw.includes('quota') || raw.includes('rate limit')) {
+        console.warn('Квота или rate limit для модели:', model, data);
+        return data;
+      }
+
+      // если получили рабочий ответ (candidates) — вернуть его
+      if (data && data.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
+        console.info('Успешный ответ от модели:', model);
+        return data;
+      }
+
+      // если есть явная ошибка — вернуть её, это может быть полезно пользователю
+      if (data && data.error) {
+        console.warn('Ошибка от модели:', model, data.error);
+        return data;
+      }
+
+      // иначе — вернуть то, что есть (может быть пустой ответ)
+      return data;
+    } catch (e) {
+      console.warn('Сетевой/неожиданный error для модели', model, e);
+      lastErr = e;
+      // при сетевой ошибке — продолжим на следующей модели
+      continue;
+    }
+  }
+  // если все модели не сработали — бросим последнее исключение или общий Text
+  throw lastErr || new Error('No available models or network error');
+}
 
 // ── API KEY ──
 function saveApiKey() {
@@ -1226,7 +1290,7 @@ function loadSituation(idx) {
 }
 
 // ── HANDLE ANSWER ──
-function handleAnswer(idx) {
+async function handleAnswer(idx) {
   if (answered) return;
   answered = true;
 
@@ -1241,8 +1305,53 @@ function handleAnswer(idx) {
     }
   });
 
-  addChatMsg('ai', a.chatMsg);
+  // If API key available, ask Gemini to comment on the chosen answer.
+  if (geminiKey) {
+    const typing = addTyping();
+    setChatLoading(true);
+    try {
+      const prompt = `Пожалуйста, дружелюбно и коротко прокомментируй выбор ребёнка.\n+Ситуация: "${s.title}". Описание: "${s.desc}".
+Выбранный вариант: "${a.text}".
+Скажи простыми словами, почему этот вариант правильный или неправильный и что можно сделать дальше. Ответь 2-3 короткими предложениями, поддерживающим тоном для ребёнка.`;
 
+      const payload = {
+        systemInstruction: { parts: [{ text: `Ты — добрый ИИ-помощник для детей 7–12 лет. Отвечай коротко и поддерживающе.` }] },
+        contents: [ { role: 'user', parts: [{ text: prompt }] } ]
+      };
+
+      let data;
+      try {
+        data = await generateWithFallback(payload);
+      } catch (err) {
+        typing.remove();
+        throw err;
+      }
+
+      typing.remove();
+
+      if (data?.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
+        addChatMsg('ai', data.candidates[0].content.parts[0].text);
+      } else if (data?.error) {
+        addChatMsg('ai', getFriendlyApiError(data.error));
+        addChatMsg('ai', a.chatMsg);
+      } else {
+        addChatMsg('ai', a.chatMsg);
+      }
+    } catch (e) {
+      // network / unexpected error
+      const typingEl = document.getElementById('typingIndicator');
+      if (typingEl) typingEl.remove();
+      addChatMsg('ai', getFriendlyApiError(e));
+      addChatMsg('ai', a.chatMsg);
+    } finally {
+      setChatLoading(false);
+    }
+  } else {
+    // no API key: use canned message
+    addChatMsg('ai', a.chatMsg);
+  }
+
+  // Open chat overlay (mobile) and show retry/next where needed
   setTimeout(() => {
     openChat();
   }, 500);
@@ -1331,6 +1440,26 @@ function setChatLoading(isLoading) {
   input.placeholder = isLoading ? 'ИИ печатает ответ...' : 'Напиши свой вопрос ИИ...';
 }
 
+function getFriendlyApiError(error) {
+  const raw = (error && (error.message || JSON.stringify(error))) || '';
+  const msg = String(raw).toLowerCase();
+
+  if (msg.includes('quota exceeded') || msg.includes('rate limit') || msg.includes('429')) {
+    return 'Gemini: превышена квота или истёк лимит запросов. Проверь биллинг/лимиты в Google AI Studio.';
+  }
+  if (msg.includes('invalid') && msg.includes('key')) {
+    return 'Неверный API-ключ. Проверь ключ и попробуй снова.';
+  }
+  if (msg.includes('permission') || msg.includes('forbidden')) {
+    return 'Нет доступа к выбранной модели. Проверь права и настройки проекта в Google Cloud.';
+  }
+  if (msg.includes('network') || msg.includes('failed to fetch')) {
+    return 'Проблема с сетью. Проверь подключение к интернету.';
+  }
+  // fallback: короткое сообщение
+  return 'Ошибка API: ' + (error?.message || String(error));
+}
+
 async function sendMessage() {
   const input = document.getElementById('chatInput');
   const text = input.value.trim();
@@ -1356,28 +1485,26 @@ async function sendMessage() {
 Используй поддерживающий тон, подходящий для детей. Не используй сложных слов.`;
 
   try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: {
-            parts: [{ text: systemPrompt }]
-          },
-          contents: [
-            { role: 'user', parts: [{ text }] }
-          ]
-        })
-      }
-    );
-    const data = await res.json();
+    const payload = {
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents: [ { role: 'user', parts: [{ text }] } ]
+    };
+
+    let data;
+    try {
+      data = await generateWithFallback(payload);
+    } catch (err) {
+      typing.remove();
+      addChatMsg('ai', getFriendlyApiError(err));
+      setChatLoading(false);
+      return;
+    }
     typing.remove();
 
-    if (data.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
+    if (data?.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
       addChatMsg('ai', data.candidates[0].content.parts[0].text);
-    } else if (data.error) {
-      addChatMsg('ai', 'Ошибка API: ' + (data.error.message || 'Проверь ключ'));
+    } else if (data?.error) {
+      addChatMsg('ai', getFriendlyApiError(data.error));
     } else {
       addChatMsg('ai', 'Не смог получить ответ. Попробуй ещё раз!');
     }
