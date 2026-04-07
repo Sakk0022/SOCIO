@@ -16,11 +16,11 @@
     <div class="api-modal-title">Выберите вид работы</div>
     <div class="api-modal-desc">
       Можно запустить тренажёр с ИИ-генератором или без него.<br>
-      Режим с ИИ использует Gemini и берёт ключ из файла .env.
+      Режим с ИИ использует Gemini через сервер и переменные окружения.
     </div>
     <button class="api-modal-btn" onclick="startWithAi()">Запустить с ИИ-генератором</button>
     <button class="api-modal-btn" onclick="skipApiKey()" style="margin-top:10px;background:#eef2ff;color:#344054">Запустить без ИИ-генератора</button>
-    <div class="api-modal-skip">Добавь ключ в .env и запусти проект через npm start</div>
+    <div class="api-modal-skip">Локально добавь GEMINI_API_KEY в .env, на Vercel — в Environment Variables</div>
   </div>
 </div>
 
@@ -210,11 +210,7 @@ const SITUATIONS = [
 
 let current = 0;
 let answered = false;
-let geminiKey = '';
-let geminiKeyPromise = null;
-
-const GEMINI_ENV_URL = './.env';
-const GEMINI_ENV_KEYS = ['GEMINI_API_KEY', 'VITE_GEMINI_API_KEY', 'GOOGLE_API_KEY'];
+let aiEnabled = false;
 
 // Список моделей для последовательного fallback — порядок по приоритету
 const GEMINI_MODELS = [
@@ -229,17 +225,14 @@ const GEMINI_MODELS = [
 async function generateWithFallback(payload) {
   let lastErr = null;
   for (const model of GEMINI_MODELS) {
-    if (!geminiKey) break; // если ключа нет, не пытаемся
+    if (!aiEnabled) break;
     try {
       console.info('Попытка модели:', model);
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        }
-      );
+      const res = await fetch('/api/gemini', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payload, model })
+      });
 
       const data = await res.json().catch(() => ({ error: { message: 'Invalid JSON in response' } }));
 
@@ -282,71 +275,15 @@ async function generateWithFallback(payload) {
   throw lastErr || new Error('No available models or network error');
 }
 
-function parseEnv(text) {
-  const env = {};
-
-  text.split(/\r?\n/).forEach((line) => {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) return;
-
-    const normalized = trimmed.startsWith('export ')
-      ? trimmed.slice(7).trim()
-      : trimmed;
-
-    const eqIndex = normalized.indexOf('=');
-    if (eqIndex === -1) return;
-
-    const key = normalized.slice(0, eqIndex).trim();
-    const value = normalized.slice(eqIndex + 1).trim().replace(/^['"]|['"]$/g, '');
-    env[key] = value;
-  });
-
-  return env;
-}
-
-async function loadGeminiKeyFromEnv() {
-  if (geminiKey) return geminiKey;
-  if (geminiKeyPromise) return geminiKeyPromise;
-
-  geminiKeyPromise = (async () => {
-    const res = await fetch(`${GEMINI_ENV_URL}?v=${Date.now()}`, { cache: 'no-store' });
-    if (!res.ok) {
-      throw new Error('Не удалось загрузить файл .env');
-    }
-
-    const envText = await res.text();
-    const env = parseEnv(envText);
-    const foundKey = GEMINI_ENV_KEYS.map((key) => env[key]).find(Boolean);
-
-    geminiKey = (foundKey || '').trim();
-    return geminiKey;
-  })();
-
-  try {
-    return await geminiKeyPromise;
-  } finally {
-    geminiKeyPromise = null;
-  }
-}
-
 // ── API KEY ──
 async function startWithAi() {
-  try {
-    geminiKey = (await loadGeminiKeyFromEnv()).trim();
-  } catch (error) {
-    console.warn('Не удалось прочитать .env:', error);
-    geminiKey = '';
-  }
-
-  if (!geminiKey) {
-    alert('Ключ Gemini не найден в файле .env. Добавь строку GEMINI_API_KEY=твой_ключ и запусти проект через npm start.');
-    return;
-  }
+  aiEnabled = true;
   document.getElementById('apiModal').style.display = 'none';
   loadSituation(0);
 }
 
 function skipApiKey() {
+  aiEnabled = false;
   document.getElementById('apiModal').style.display = 'none';
   loadSituation(0);
 }
@@ -448,7 +385,7 @@ async function handleAnswer(idx) {
   });
 
   // If API key available, ask Gemini to comment on the chosen answer.
-  if (geminiKey) {
+  if (aiEnabled) {
     const typing = addTyping();
     setChatLoading(true);
     try {
@@ -617,6 +554,9 @@ function getFriendlyApiError(error) {
   if (msg.includes('quota exceeded') || msg.includes('rate limit') || msg.includes('429')) {
     return 'Gemini: превышена квота или истёк лимит запросов. Проверь биллинг/лимиты в Google AI Studio.';
   }
+  if (msg.includes('not configured on the server')) {
+    return 'На сервере не настроена переменная окружения GEMINI_API_KEY. Добавь её в Vercel и сделай Redeploy.';
+  }
   if (msg.includes('invalid') && msg.includes('key')) {
     return 'Неверный API-ключ. Проверь ключ и попробуй снова.';
   }
@@ -640,8 +580,8 @@ async function sendMessage() {
 
   addChatMsg('user', text);
 
-  if (!geminiKey) {
-    addChatMsg('ai', 'Для свободного чата нужен Gemini API ключ из файла .env. Перезапусти страницу и выбери режим с ИИ.');
+  if (!aiEnabled) {
+    addChatMsg('ai', 'Для свободного чата включи режим с ИИ. На Vercel ключ берётся из Environment Variables, локально — из .env на сервере.');
     return;
   }
 

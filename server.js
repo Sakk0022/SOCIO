@@ -18,8 +18,109 @@ const CONTENT_TYPES = {
   ".gif": "image/gif",
   ".svg": "image/svg+xml; charset=utf-8",
   ".ico": "image/x-icon",
-  ".env": "text/plain; charset=utf-8",
 };
+
+function loadEnvFile() {
+  const envPath = path.join(ROOT_DIR, ".env");
+  if (!fs.existsSync(envPath)) return;
+
+  const envText = fs.readFileSync(envPath, "utf8");
+  envText.split(/\r?\n/).forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) return;
+
+    const normalized = trimmed.startsWith("export ")
+      ? trimmed.slice(7).trim()
+      : trimmed;
+
+    const eqIndex = normalized.indexOf("=");
+    if (eqIndex === -1) return;
+
+    const key = normalized.slice(0, eqIndex).trim();
+    const value = normalized
+      .slice(eqIndex + 1)
+      .trim()
+      .replace(/^['"]|['"]$/g, "");
+
+    if (!(key in process.env)) {
+      process.env[key] = value;
+    }
+  });
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 1_000_000) {
+        reject(new Error("Payload too large"));
+        req.destroy();
+      }
+    });
+
+    req.on("end", () => {
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch (error) {
+        reject(error);
+      }
+    });
+
+    req.on("error", reject);
+  });
+}
+
+async function handleGeminiProxy(req, res) {
+  if (req.method !== "POST") {
+    return send(res, 405, JSON.stringify({ error: "Method not allowed" }), {
+      "Content-Type": "application/json; charset=utf-8",
+      Allow: "POST",
+    });
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return send(
+      res,
+      500,
+      JSON.stringify({ error: "Gemini API key not configured on the server" }),
+      { "Content-Type": "application/json; charset=utf-8" },
+    );
+  }
+
+  try {
+    const { payload, model } = await readJsonBody(req);
+    if (!payload) {
+      return send(res, 400, JSON.stringify({ error: "Missing payload" }), {
+        "Content-Type": "application/json; charset=utf-8",
+      });
+    }
+
+    const modelName = model || "gemini-2.5-flash";
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const text = await response.text();
+    res.writeHead(response.status, {
+      "Content-Type":
+        response.headers.get("content-type") ||
+        "application/json; charset=utf-8",
+    });
+    res.end(text);
+  } catch (error) {
+    send(res, 500, JSON.stringify({ error: String(error) }), {
+      "Content-Type": "application/json; charset=utf-8",
+    });
+  }
+}
+
+loadEnvFile();
 
 function send(res, statusCode, body, headers = {}) {
   res.writeHead(statusCode, headers);
@@ -43,6 +144,13 @@ function getSafePath(requestUrl) {
 }
 
 const server = http.createServer((req, res) => {
+  const parsedUrl = new URL(req.url || "/", `http://${HOST}:${PORT}`);
+
+  if (parsedUrl.pathname === "/api/gemini") {
+    handleGeminiProxy(req, res);
+    return;
+  }
+
   const filePath = getSafePath(req.url || "/");
 
   if (!filePath) {
@@ -64,10 +172,6 @@ const server = http.createServer((req, res) => {
     const headers = {
       "Content-Type": CONTENT_TYPES[ext] || "application/octet-stream",
     };
-
-    if (path.basename(filePath) === ".env") {
-      headers["Cache-Control"] = "no-store";
-    }
 
     const stream = fs.createReadStream(filePath);
     stream.on("error", () => {
