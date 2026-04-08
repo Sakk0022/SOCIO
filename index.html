@@ -551,6 +551,12 @@ function getFriendlyApiError(error) {
   if (msg.includes('quota exceeded') || msg.includes('rate limit') || msg.includes('429')) {
     return 'Gemini: превышена квота или истёк лимит запросов. Проверь биллинг/лимиты в Google AI Studio.';
   }
+  if (msg.includes('missing authentication header')) {
+    return 'Для OpenRouter нужен другой ключ. В `GEMINI_API_KEY` должен быть ключ OpenRouter, а не Gemini. После замены сделай Redeploy.';
+  }
+  if (msg.includes('must contain an openrouter api key')) {
+    return 'Сейчас в `GEMINI_API_KEY` лежит не OpenRouter-ключ. Оставь имя переменной тем же, но вставь ключ OpenRouter вида sk-or-v1-... и сделай Redeploy.';
+  }
   if (msg.includes('not configured on the server')) {
     return 'На сервере не настроена переменная окружения GEMINI_API_KEY. Добавь её в Vercel и сделай Redeploy.';
   }

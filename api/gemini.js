@@ -53,6 +53,10 @@ function openRouterToGeminiResponse(data) {
   };
 }
 
+function isLikelyOpenRouterKey(apiKey) {
+  return typeof apiKey === "string" && apiKey.trim().startsWith("sk-or-v1-");
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
@@ -64,6 +68,15 @@ export default async function handler(req, res) {
     return res
       .status(500)
       .json({ error: "Gemini API key not configured on the server" });
+
+  if (!isLikelyOpenRouterKey(apiKey)) {
+    return res.status(500).json({
+      error: {
+        message:
+          "GEMINI_API_KEY must contain an OpenRouter API key (sk-or-v1-...), not a Gemini key",
+      },
+    });
+  }
 
   try {
     const { payload, model } = req.body || {};
