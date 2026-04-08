@@ -72,6 +72,58 @@ function readJsonBody(req) {
   });
 }
 
+function geminiPayloadToOpenRouterMessages(payload = {}) {
+  const messages = [];
+  const systemText = Array.isArray(payload.systemInstruction?.parts)
+    ? payload.systemInstruction.parts
+        .map((part) => part?.text || "")
+        .filter(Boolean)
+        .join("\n\n")
+    : "";
+
+  if (systemText) {
+    messages.push({ role: "system", content: systemText });
+  }
+
+  for (const item of payload.contents || []) {
+    const content = Array.isArray(item?.parts)
+      ? item.parts
+          .map((part) => part?.text || "")
+          .filter(Boolean)
+          .join("\n\n")
+      : "";
+
+    if (!content) continue;
+
+    messages.push({
+      role: item?.role === "model" ? "assistant" : item?.role || "user",
+      content,
+    });
+  }
+
+  return messages;
+}
+
+function openRouterToGeminiResponse(data) {
+  const text = data?.choices?.[0]?.message?.content;
+  const normalizedText = Array.isArray(text)
+    ? text
+        .map((item) => (typeof item === "string" ? item : item?.text || ""))
+        .filter(Boolean)
+        .join("\n")
+    : text;
+
+  return {
+    candidates: [
+      {
+        content: {
+          parts: [{ text: normalizedText || "" }],
+        },
+      },
+    ],
+  };
+}
+
 async function handleGeminiProxy(req, res) {
   if (req.method !== "POST") {
     return send(res, 405, JSON.stringify({ error: "Method not allowed" }), {
@@ -98,21 +150,42 @@ async function handleGeminiProxy(req, res) {
       });
     }
 
-    const modelName = model || "gemini-2.5-flash";
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    const modelName = model || "nvidia/nemotron-3-super-120b-a12b:free";
+    const response = await fetch(
+      "https://openrouter.ai/api/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: modelName,
+          messages: geminiPayloadToOpenRouterMessages(payload),
+        }),
+      },
+    );
 
-    const text = await response.text();
-    res.writeHead(response.status, {
-      "Content-Type":
-        response.headers.get("content-type") ||
-        "application/json; charset=utf-8",
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      return send(
+        res,
+        response.status,
+        JSON.stringify({
+          error: {
+            message:
+              data?.error?.message ||
+              data?.message ||
+              "OpenRouter request failed",
+          },
+        }),
+        { "Content-Type": "application/json; charset=utf-8" },
+      );
+    }
+
+    return send(res, 200, JSON.stringify(openRouterToGeminiResponse(data)), {
+      "Content-Type": "application/json; charset=utf-8",
     });
-    res.end(text);
   } catch (error) {
     send(res, 500, JSON.stringify({ error: String(error) }), {
       "Content-Type": "application/json; charset=utf-8",

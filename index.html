@@ -214,11 +214,8 @@ let aiEnabled = false;
 
 // Список моделей для последовательного fallback — порядок по приоритету
 const GEMINI_MODELS = [
-  
-  'gemini-3-flash',
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-lite',
-   'chat-bison@001'
+  'nvidia/nemotron-3-super-120b-a12b:free',
+  'stepfun/step-3.5-flash:free'
 ];
 
 // Универсальная обёртка: пробует модели одну за другой, пока не получит приемлемый ответ.
