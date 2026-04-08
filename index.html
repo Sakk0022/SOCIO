@@ -26,7 +26,9 @@
 
 <!-- HEADER -->
 <div class="header">
-  <div class="header-logo">🧠</div>
+  <div class="header-logo">
+    <img src="situacia/logo.jpg" alt="Логотип проекта"/>
+  </div>
   <div class="header-text">
     <div class="header-title">AI-тренажёр <span>социальных ситуаций</span> для инклюзивного образования</div>
   </div>
@@ -549,16 +551,16 @@ function getFriendlyApiError(error) {
   const msg = String(raw).toLowerCase();
 
   if (msg.includes('quota exceeded') || msg.includes('rate limit') || msg.includes('429')) {
-    return 'Gemini: превышена квота или истёк лимит запросов. Проверь биллинг/лимиты в Google AI Studio.';
+    return 'OpenRouter: превышена квота или истёк лимит запросов. Если добавлен резервный ключ, система попробует его автоматически.';
   }
   if (msg.includes('missing authentication header')) {
-    return 'Для OpenRouter нужен другой ключ. В `GEMINI_API_KEY` должен быть ключ OpenRouter, а не Gemini. После замены сделай Redeploy.';
+    return 'Для OpenRouter нужен корректный ключ. В `GEMINI_API_KEY` и при необходимости в `GEMINI_API_KEY_FALLBACK` должны быть ключи OpenRouter. После замены сделай Redeploy.';
   }
   if (msg.includes('must contain an openrouter api key')) {
-    return 'Сейчас в `GEMINI_API_KEY` лежит не OpenRouter-ключ. Оставь имя переменной тем же, но вставь ключ OpenRouter вида sk-or-v1-... и сделай Redeploy.';
+    return 'В `GEMINI_API_KEY` или `GEMINI_API_KEY_FALLBACK` лежит не OpenRouter-ключ. Оставь имя основной переменной тем же и используй ключи OpenRouter вида sk-or-v1-...';
   }
   if (msg.includes('not configured on the server')) {
-    return 'На сервере не настроена переменная окружения GEMINI_API_KEY. Добавь её в Vercel и сделай Redeploy.';
+    return 'На сервере не настроены переменные окружения OpenRouter. Добавь `GEMINI_API_KEY` и при желании `GEMINI_API_KEY_FALLBACK` в Vercel и сделай Redeploy.';
   }
   if (msg.includes('invalid') && msg.includes('key')) {
     return 'Неверный API-ключ. Проверь ключ и попробуй снова.';
